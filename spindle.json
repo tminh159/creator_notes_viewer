@@ -1,0 +1,11 @@
+{
+  "identifier": "creator_notes_viewer",
+  "version": "1.0.0",
+  "name": "Creator Notes Viewer",
+  "author": "Developer",
+  "description": "Renders Creator's Notes HTML/CSS as a rich live preview in a drawer tab.",
+  "permissions": ["ui_panels", "characters"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "1.0.0"
+}
