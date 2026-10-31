@@ -22,7 +22,10 @@ async function loadState(): Promise<any> {
   return null;
 }
 
-async function saveState(state: any): Promise<void> {
+let isSaving = false;
+let queuedState: any = undefined;
+
+async function writeStateToDisk(state: any): Promise<void> {
   try {
     const json = JSON.stringify(state, null, 2);
     // Atomic write
@@ -39,6 +42,22 @@ async function saveState(state: any): Promise<void> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CreatorNotesBackend] Failed to save state: ${msg}`);
+  }
+}
+
+async function saveState(state: any): Promise<void> {
+  if (!state || typeof state !== "object") return;
+  queuedState = state;
+  if (isSaving) return;
+  isSaving = true;
+  try {
+    while (queuedState !== undefined) {
+      const next = queuedState;
+      queuedState = undefined;
+      await writeStateToDisk(next);
+    }
+  } finally {
+    isSaving = false;
   }
 }
 

@@ -18,7 +18,9 @@ async function loadState() {
   }
   return null;
 }
-async function saveState(state) {
+var isSaving = false;
+var queuedState = undefined;
+async function writeStateToDisk(state) {
   try {
     const json = JSON.stringify(state, null, 2);
     await spindle.storage.write(STORAGE_TMP_KEY, json);
@@ -33,6 +35,23 @@ async function saveState(state) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CreatorNotesBackend] Failed to save state: ${msg}`);
+  }
+}
+async function saveState(state) {
+  if (!state || typeof state !== "object")
+    return;
+  queuedState = state;
+  if (isSaving)
+    return;
+  isSaving = true;
+  try {
+    while (queuedState !== undefined) {
+      const next = queuedState;
+      queuedState = undefined;
+      await writeStateToDisk(next);
+    }
+  } finally {
+    isSaving = false;
   }
 }
 spindle.onFrontendMessage(async (payload, userId) => {

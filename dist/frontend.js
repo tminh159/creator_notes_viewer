@@ -13,11 +13,12 @@ var STYLES = `
   justify-content: flex-end;
   padding: 0 10px;
   z-index: 9999;
+  pointer-events: none;
 }
 
 .cnv-toolbar-btn {
   opacity: 0;
-  pointer-events: none;
+  pointer-events: auto;
   transition: opacity var(--lumiverse-transition-fast, 0.15s) ease, background var(--lumiverse-transition-fast, 0.15s) ease, transform var(--lumiverse-transition-fast, 0.15s) ease;
   background: var(--lumiverse-bg, rgba(30, 30, 30, 0.85));
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.12));
@@ -32,17 +33,18 @@ var STYLES = `
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
   margin-left: 6px;
 }
-.cnv-toolbar-btn:hover {
+.cnv-drawer-root:hover .cnv-toolbar .cnv-toolbar-btn {
+  opacity: 0.65;
+}
+.cnv-toolbar-btn:hover,
+.cnv-drawer-root:hover .cnv-toolbar .cnv-toolbar-btn:hover {
+  opacity: 1;
   background: var(--lumiverse-bg-hover, rgba(50, 50, 50, 0.95));
   color: var(--lumiverse-text, #ffffff);
   transform: translateY(-1px);
 }
 .cnv-toolbar-btn:active {
   transform: translateY(0);
-}
-.cnv-toolbar:hover .cnv-toolbar-btn {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 /* Custom tooltip */
@@ -186,21 +188,18 @@ var STYLES = `
   left: 0;
   top: 0;
   bottom: 0;
-  width: 12px;
+  width: 10px;
 }
 
 .cnv-edge-right {
-  right: 12px;
-  top: 0;
-  bottom: 0;
-  width: 12px;
+  display: none;
 }
 
 .cnv-edge-bottom {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 12px;
+  height: 10px;
 }
 
 .cnv-widget-toolbar .cnv-toolbar-btn {
@@ -216,8 +215,13 @@ var STYLES = `
 .cnv-widget-content {
   width: 100%;
   height: 100%;
+  padding-right: 6px;
+  box-sizing: border-box;
   overflow: hidden;
   position: relative;
+}
+.cnv-widget.fullscreen .cnv-widget-content {
+  padding-right: 0;
 }
 
 /* Resize handles */
@@ -326,6 +330,7 @@ var ALLOWED_TAGS = new Set([
   "blockquote",
   "br",
   "caption",
+  "center",
   "cite",
   "code",
   "col",
@@ -413,7 +418,8 @@ var BLOCKED_TAGS = new Set([
   "applet",
   "base",
   "template",
-  "meta"
+  "meta",
+  "title"
 ]);
 var ALLOWED_ATTRS = new Set([
   "href",
@@ -458,7 +464,9 @@ var ALLOWED_ATTRS = new Set([
   "muted",
   "preload",
   "poster",
-  "playsinline"
+  "playsinline",
+  "referrerpolicy",
+  "align"
 ]);
 var URL_ATTRS = new Set(["href", "src", "poster", "data", "action", "formaction"]);
 var SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:", "data:image/"]);
@@ -704,29 +712,32 @@ var NAMED_ENTITIES = {
   diams: "♦"
 };
 function sanitize(raw) {
-  const decoded = decodeEntities(raw);
-  const stripped = stripDangerousConstructs(decoded);
+  const stripped = stripDangerousConstructs(raw);
   const doc = parseHTML(stripped);
   walkAndFilter(doc, ALLOWED_TAGS, BLOCKED_TAGS, ALLOWED_ATTRS, URL_ATTRS, SAFE_PROTOCOLS);
   return serialize(doc);
 }
 function decodeEntities(html) {
   let result = html;
-  result = result.replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) => {
+  result = result.replace(/&#x([0-9A-Fa-f]+);?/g, (_, hex) => {
     const cp = parseInt(hex, 16);
-    return cp > 0 ? String.fromCodePoint(cp) : `�`;
+    return cp > 0 && cp <= 1114111 ? String.fromCodePoint(cp) : `�`;
   });
-  result = result.replace(/&#(\d+);/g, (_, dec) => {
+  result = result.replace(/&#(\d+);?/g, (_, dec) => {
     const cp = parseInt(dec, 10);
-    return cp > 0 ? String.fromCodePoint(cp) : `�`;
+    return cp > 0 && cp <= 1114111 ? String.fromCodePoint(cp) : `�`;
   });
-  result = result.replace(/&([A-Za-z]+);/g, (full, name) => {
+  result = result.replace(/&([A-Za-z0-9]+);/g, (full, name) => {
     return NAMED_ENTITIES[name] ?? full;
   });
   return result;
 }
 function stripDangerousConstructs(html) {
   let out = html;
+  out = out.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  out = out.replace(/<!DOCTYPE[^>]*>/gi, "");
+  out = out.replace(/<\?[\s\S]*?\?>/g, "");
+  out = out.replace(/<title\b[\s\S]*?<\/title\s*>/gi, "");
   out = out.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
   out = out.replace(/<script[^>]*>/gi, "");
   out = out.replace(/<svg[\s\S]*?<\/svg\s*>/gi, "");
@@ -761,6 +772,18 @@ function parseHTML(html) {
       if (i > 0)
         stack.length = i;
     } else {
+      if (tagLower === "li") {
+        for (let i = stack.length - 1;i > 0; i--) {
+          if (stack[i].tag === "ul" || stack[i].tag === "ol")
+            break;
+          if (stack[i].tag === "li") {
+            stack.length = i;
+            break;
+          }
+        }
+      } else if (tagLower === "p" && stack[stack.length - 1].tag === "p") {
+        stack.pop();
+      }
       const el = {
         type: "element",
         tag: tagLower,
@@ -772,14 +795,22 @@ function parseHTML(html) {
       if (!selfClose && !VOID_TAGS.has(tagLower) && !RAW_TEXT_ELEMENTS.has(tagLower)) {
         stack.push(el);
       } else if (RAW_TEXT_ELEMENTS.has(tagLower)) {
-        const closingTag = `</${tagLower}>`;
-        const rawEnd = html.indexOf(closingTag, m.index + m[0].length);
-        if (rawEnd !== -1) {
-          const innerContent = html.slice(m.index + m[0].length, rawEnd);
+        const afterOpenIdx = m.index + m[0].length;
+        const closeRe = new RegExp(`<\\/\\s*${tagLower}\\s*>`, "i");
+        const closeMatch = closeRe.exec(html.slice(afterOpenIdx));
+        if (closeMatch) {
+          const rawEnd = afterOpenIdx + closeMatch.index;
+          const innerContent = html.slice(afterOpenIdx, rawEnd);
           el.children = [{ type: "text", content: innerContent }];
-          tagRe.lastIndex = rawEnd + closingTag.length;
+          tagRe.lastIndex = rawEnd + closeMatch[0].length;
           last = tagRe.lastIndex;
           continue;
+        } else {
+          const innerContent = html.slice(afterOpenIdx);
+          el.children = [{ type: "text", content: innerContent }];
+          tagRe.lastIndex = html.length;
+          last = html.length;
+          break;
         }
       }
     }
@@ -819,7 +850,8 @@ function parseAttrs(raw) {
     const key = rawKey.toLowerCase();
     if (key.startsWith("on"))
       continue;
-    attrs[rawKey] = m[2] ?? m[3] ?? m[4] ?? "";
+    const rawVal = m[2] ?? m[3] ?? m[4] ?? "";
+    attrs[rawKey] = decodeEntities(rawVal);
   }
   return attrs;
 }
@@ -828,26 +860,31 @@ function walkAndFilter(node, allowedTags, blockedTags, allowedAttrs, urlAttrs, s
     return;
   if (!node.children)
     return;
-  node.children = node.children.filter((child) => {
+  node.children = node.children.flatMap((child) => {
     if (child.type === "text") {
       if (node.type === "element" && node.tag === "style") {
         child.content = sanitizeCSS(child.content ?? "");
       }
-      return true;
+      return [child];
     }
     if (child.type !== "element")
-      return false;
+      return [];
     if (!child.tag || blockedTags.has(child.tag))
-      return false;
+      return [];
     if (child.tag === "link") {
       const rel = (child.attrs?.rel ?? "").toLowerCase().trim();
-      const href = child.attrs?.href ?? "";
-      if (rel === "stylesheet" && isSafeURL(href, safeProtocols))
-        return true;
-      return false;
+      const href = resolveRelativeUrl(child.attrs?.href ?? "");
+      if (rel === "stylesheet" && isSafeURL(href, new Set(["http:", "https:"]))) {
+        child.attrs = { rel: "stylesheet", href };
+        child.children = [];
+        return [child];
+      }
+      return [];
     }
-    if (!allowedTags.has(child.tag))
-      return false;
+    if (!allowedTags.has(child.tag)) {
+      walkAndFilter(child, allowedTags, blockedTags, allowedAttrs, urlAttrs, safeProtocols);
+      return child.children ?? [];
+    }
     const filteredAttrs = {};
     if (child.attrs) {
       for (const [k, v] of Object.entries(child.attrs)) {
@@ -862,19 +899,61 @@ function walkAndFilter(node, allowedTags, blockedTags, allowedAttrs, urlAttrs, s
           filteredAttrs[kLower] = sanitizeCSS(v);
           continue;
         }
-        if (urlAttrs.has(kLower) && !isSafeURL(v, safeProtocols))
+        if (urlAttrs.has(kLower)) {
+          const resolvedUrl = resolveRelativeUrl(v);
+          if (!isSafeURL(resolvedUrl, safeProtocols))
+            continue;
+          filteredAttrs[kLower] = resolvedUrl;
           continue;
+        }
         filteredAttrs[kLower] = v;
       }
     }
+    if (child.tag === "a") {
+      const href = (filteredAttrs["href"] ?? "").trim();
+      if (href.startsWith("#")) {
+        delete filteredAttrs["target"];
+        delete filteredAttrs["rel"];
+      } else if (href) {
+        filteredAttrs["target"] = "_blank";
+        filteredAttrs["rel"] = "noopener noreferrer";
+      }
+    } else if (child.tag === "img" || child.tag === "video" || child.tag === "audio") {
+      filteredAttrs["referrerpolicy"] = "no-referrer";
+    }
     child.attrs = filteredAttrs;
     walkAndFilter(child, allowedTags, blockedTags, allowedAttrs, urlAttrs, safeProtocols);
-    return true;
+    return [child];
   });
 }
+function getHostOrigin() {
+  try {
+    if (typeof window !== "undefined" && window.location?.origin && /^https?:\/\//i.test(window.location.origin)) {
+      return window.location.origin.replace(/\/+$/, "");
+    }
+  } catch {}
+  return "";
+}
+function resolveRelativeUrl(url) {
+  const trimmed = url.trim();
+  if (/^\/(?!\/)/.test(trimmed)) {
+    const origin = getHostOrigin();
+    if (origin)
+      return `${origin}${trimmed}`;
+  }
+  return trimmed;
+}
 function sanitizeCSS(css) {
-  let out = css;
-  out = out.replace(/@import\s+(?!url\s*\()/gi, "/* removed */ ");
+  let out = css.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, "");
+  out = out.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_, hex) => {
+    const cp = parseInt(hex, 16);
+    return cp > 0 && cp <= 1114111 ? String.fromCodePoint(cp) : "";
+  });
+  const origin = getHostOrigin();
+  if (origin) {
+    out = out.replace(/url\(\s*(["']?)(\/(?!\/)[^)"'\s]+)\1\s*\)/gi, `url($1${origin}$2$1)`);
+  }
+  out = out.replace(/@import\s+(?!url\s*\(\s*["']?https?:\/\/)/gi, "/* removed */ ");
   out = out.replace(/expression\s*\(/gi, "/* removed */(");
   out = out.replace(/behavior\s*:/gi, "/* removed */:");
   out = out.replace(/-moz-binding\s*:/gi, "/* removed */:");
@@ -883,30 +962,41 @@ function sanitizeCSS(css) {
   out = out.replace(/url\s*\(\s*(["']?)\s*javascript\s*:/gi, "url($1/* removed */:");
   out = out.replace(/url\s*\(\s*(["']?)\s*vbscript\s*:/gi, "url($1/* removed */:");
   out = out.replace(/url\s*\(\s*(["']?)\s*data\s*:\s*(?!image\/)/gi, "url($1/* removed */:");
+  out = out.replace(/<\/\s*style/gi, "/* removed */");
   out = out.replace(/\btext-align\s*:\s*justify\b/gi, "text-align: left");
   return out;
 }
 function isSafeURL(url, safeProtocols) {
-  const trimmed = url.trim().toLowerCase();
-  if (trimmed.startsWith("#") || trimmed.startsWith("data:image/"))
+  const decoded = decodeEntities(url).replace(/[\u0000-\u0020]+/g, "");
+  const lower = decoded.toLowerCase();
+  if (lower.startsWith("#") || lower.startsWith("data:image/"))
     return true;
+  if (/^\/(?!\/)/.test(decoded))
+    return safeProtocols.has("http:") || safeProtocols.has("https:");
+  if (decoded.startsWith("//"))
+    return false;
   try {
-    const parsed = new URL(url, "https://placeholder");
+    const parsed = new URL(decoded);
     return safeProtocols.has(parsed.protocol);
   } catch {
     return false;
   }
 }
-function serialize(node) {
-  if (node.type === "text")
-    return node.content ?? "";
+function serialize(node, inRawText = false) {
+  if (node.type === "text") {
+    const content = node.content ?? "";
+    if (inRawText)
+      return content;
+    return content.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
   if (node.type === "root" || !node.tag) {
-    return (node.children ?? []).map(serialize).join("");
+    return (node.children ?? []).map((c) => serialize(c, false)).join("");
   }
   const attrs = Object.entries(node.attrs ?? {}).map(([k, v]) => ` ${k}="${escAttr(v)}"`).join("");
   if (VOID_TAGS.has(node.tag))
     return `<${node.tag}${attrs}>`;
-  const children = (node.children ?? []).map(serialize).join("");
+  const isRaw = RAW_TEXT_ELEMENTS.has(node.tag);
+  const children = (node.children ?? []).map((c) => serialize(c, isRaw)).join("");
   return `<${node.tag}${attrs}>${children}</${node.tag}>`;
 }
 function escAttr(s) {
@@ -916,26 +1006,171 @@ function escAttr(s) {
 // src/markdown.ts
 var STYLE_TAG_LOOKAHEAD = 200;
 var STYLE_TAG_MIN_LENGTH = 50;
+function applyInlineMarkdown(input) {
+  let out = input;
+  out = out.replace(/`([^`\n]+?)`/g, (_, c) => `<code>${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`);
+  out = out.replace(/\*{3}([^*\n]+?)\*{3}/g, "<strong><em>$1</em></strong>");
+  out = out.replace(/\*{2}([^*\n]+?)\*{2}/g, "<strong>$1</strong>");
+  out = out.replace(/\*([^*\n]+?)\*/g, "<em>$1</em>");
+  out = out.replace(/(?<![\w_])_{3}([^_\n]*[\p{L}\p{N}][^_\n]*?)_{3}(?![\w_])/gu, "<strong><em>$1</em></strong>");
+  out = out.replace(/(?<![\w_])_{2}([^_\n]*[\p{L}\p{N}][^_\n]*?)_{2}(?![\w_])/gu, "<strong>$1</strong>");
+  out = out.replace(/(?<![\w_])_([^_\n]*[\p{L}\p{N}][^_\n]*?)_(?![\w_])/gu, "<em>$1</em>");
+  out = out.replace(/~~([^~\n]+?)~~/g, "<s>$1</s>");
+  out = out.replace(/\[!\[([^\]]*)\]\(((?:[^\s()]+|\([^\s()]*\))+)(?:\s*=[^)]*)?(?:\s+"[^"]*")?\)\]\(((?:[^\s()]+|\([^\s()]*\))+)\)/g, (match, alt, imgSrc, linkHref) => {
+    if (!/^(https?:\/\/|\/(?!\/)|data:image\/)/i.test(imgSrc))
+      return match;
+    const altAttr = alt ? ` alt="${alt.replace(/"/g, "&quot;")}"` : "";
+    if (/^#/.test(linkHref)) {
+      return `<a href="${linkHref}"><img src="${imgSrc}"${altAttr} referrerpolicy="no-referrer" loading="lazy"></a>`;
+    }
+    const safeLink = /^(https?:\/\/|\/(?!\/)|mailto:)/i.test(linkHref) ? linkHref : "#";
+    const targetAttr = safeLink.startsWith("#") ? "" : ' target="_blank" rel="noopener noreferrer"';
+    return `<a href="${safeLink}"${targetAttr}><img src="${imgSrc}"${altAttr} referrerpolicy="no-referrer" loading="lazy"></a>`;
+  });
+  out = out.replace(/!\[([^\]]*)\]\(((?:[^\s()]+|\([^\s()]*\))+)(?:\s*=[^)]*)?(?:\s+"[^"]*")?\)/g, (match, alt, src) => {
+    if (!/^(https?:\/\/|\/(?!\/)|data:image\/)/i.test(src))
+      return match;
+    const altAttr = alt ? ` alt="${alt.replace(/"/g, "&quot;")}"` : "";
+    return `<img src="${src}"${altAttr} referrerpolicy="no-referrer" loading="lazy">`;
+  });
+  out = out.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/(?!\/)|mailto:|#)(?:[^\s()]+|\([^\s()]*\))*)\)/gi, (_, text, href) => {
+    if (href.startsWith("#")) {
+      return `<a href="${href}">${text}</a>`;
+    }
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+  });
+  return out;
+}
+function processHtmlBlockInlineMarkdown(blockHtml) {
+  if (/^<\s*(style|pre|code)\b/i.test(blockHtml)) {
+    return blockHtml;
+  }
+  const rawChunks = [];
+  let protectedHtml = blockHtml.replace(/<(style|pre|code)\b[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, (m) => {
+    const idx = rawChunks.length;
+    rawChunks.push(m);
+    return `\x01RAW${idx}\x01`;
+  });
+  protectedHtml = protectedHtml.replace(/`([^`\n]+?)`/g, (_, c) => {
+    const idx = rawChunks.length;
+    rawChunks.push(`<code>${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`);
+    return `\x01RAW${idx}\x01`;
+  });
+  const tagChunks = [];
+  protectedHtml = protectedHtml.replace(/<[^>]+>/g, (m) => {
+    const idx = tagChunks.length;
+    tagChunks.push(m);
+    return `\x01TAG${idx}\x01`;
+  });
+  protectedHtml = applyInlineMarkdown(protectedHtml);
+  if (protectedHtml.includes(`
+
+`)) {
+    protectedHtml = protectedHtml.split(/\n{2,}/).map((chunk) => {
+      const trimmed = chunk.trim();
+      if (!trimmed)
+        return "";
+      if (!/\x01TAG\d+\x01/.test(trimmed)) {
+        return `<p>${trimmed.replace(/\n/g, "<br>")}</p>`;
+      }
+      return chunk;
+    }).join(`
+
+`);
+  }
+  protectedHtml = protectedHtml.replace(/\x01TAG(\d+)\x01/g, (_, i) => tagChunks[+i]);
+  protectedHtml = protectedHtml.replace(/\x01RAW(\d+)\x01/g, (_, i) => rawChunks[+i]);
+  return protectedHtml;
+}
+function renderStatusContent(message, isError = false) {
+  const escaped = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const style = isError ? "color:#f87171;padding:12px;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;" : "color:#e0e0e0;opacity:0.5;padding:12px;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;margin:0;";
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">`;
+  return `<!DOCTYPE html><html style="color-scheme:dark light;background:transparent;"><head><meta charset="UTF-8">${csp}</head><body style="margin:0;background:transparent;"><p style="${style}">${escaped}</p></body></html>`;
+}
 function renderContent(rawHtml, charName) {
-  let processed = rawHtml.replace(/\{\{char\}\}/gi, charName || "{{char}}").replace(/\{\{user\}\}/gi, "You");
-  processed = processed.replace(/\r\n/g, `
+  const rawCharName = charName || "{{char}}";
+  const escapedCharName = rawCharName.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const substituteMacrosRaw = (s) => s.replace(/\{\{char\}\}/gi, () => rawCharName).replace(/\{\{user\}\}/gi, () => "You");
+  const substituteMacrosHtml = (s) => s.replace(/\{\{char\}\}/gi, () => escapedCharName).replace(/\{\{user\}\}/gi, () => "You");
+  let processed = rawHtml.replace(/\r\n/g, `
 `).replace(/\r/g, `
 `);
   const hasStyleTagAtStart = new RegExp(`^[\\s\\S]{0,${STYLE_TAG_LOOKAHEAD}}<style[^>]*>[\\s\\S]{${STYLE_TAG_MIN_LENGTH},}<\\/style>`, "i").test(processed);
   if (hasStyleTagAtStart) {
-    processed = processed.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s*=[^)]*)?(?:\s+"[^"]*")?\)/g, (match, alt, src) => {
-      if (!src.match(/^(https?:\/\/|\/)/i))
-        return match;
-      const altAttr = alt ? ` alt="${alt.replace(/"/g, "&quot;")}"` : "";
-      return `<img src="${src}"${altAttr} referrerpolicy="no-referrer" loading="lazy">`;
+    const rawChunks = [];
+    processed = processed.replace(/<(style|pre|code)\b[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, (m) => {
+      const idx = rawChunks.length;
+      rawChunks.push(substituteMacrosRaw(m));
+      return `\x01RAW${idx}\x01`;
     });
+    processed = processed.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+      const cls = lang.trim() ? ` class="language-${lang.trim()}"` : "";
+      const sub = substituteMacrosRaw(code).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const idx = rawChunks.length;
+      rawChunks.push(`<pre><code${cls}>${sub}</code></pre>`);
+      return `\x01RAW${idx}\x01`;
+    });
+    processed = processed.replace(/`([^`\n]+?)`/g, (_, c) => {
+      const sub = substituteMacrosRaw(c).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const idx = rawChunks.length;
+      rawChunks.push(`<code>${sub}</code>`);
+      return `\x01RAW${idx}\x01`;
+    });
+    processed = substituteMacrosHtml(processed);
+    processed = processed.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+    processed = processed.replace(/<!DOCTYPE[^>]*>/gi, "");
+    processed = processed.replace(/<\?[\s\S]*?\?>/g, "");
+    processed = processed.replace(/<title\b[\s\S]*?<\/title\s*>/gi, "");
+    processed = processed.replace(/<meta\b[^>]*>/gi, "");
+    processed = processed.replace(/<\/?(?:html|head|body)\b[^>]*>/gi, "");
+    processed = processed.replace(/<(https?:\/\/[^\s<>]+)>/gi, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+    const tagChunks = [];
+    processed = processed.replace(/<[^>]+>/g, (m) => {
+      const idx = tagChunks.length;
+      tagChunks.push(m);
+      return `\x01TAG${idx}\x01`;
+    });
+    processed = applyInlineMarkdown(processed);
+    processed = processed.replace(/\x01TAG(\d+)\x01/g, (_, i) => tagChunks[+i]);
+    processed = processed.replace(/\x01RAW(\d+)\x01/g, (_, i) => rawChunks[+i]);
   } else {
     processed = processed.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, code) => {
       const cls = lang.trim() ? ` class="language-${lang.trim()}"` : "";
-      return `<pre><code${cls}>${code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code></pre>`;
+      const sub = substituteMacrosRaw(code).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return `<pre><code${cls}>${sub}</code></pre>`;
     });
+    processed = processed.replace(/`([^`\n]+?)`/g, (_, c) => {
+      const sub = substituteMacrosRaw(c).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return `<code>${sub}</code>`;
+    });
+    processed = substituteMacrosHtml(processed);
+    processed = processed.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+    processed = processed.replace(/<!DOCTYPE[^>]*>/gi, "");
+    processed = processed.replace(/<\?[\s\S]*?\?>/g, "");
+    processed = processed.replace(/<title\b[\s\S]*?<\/title\s*>/gi, "");
+    processed = processed.replace(/<meta\b[^>]*>/gi, "");
+    processed = processed.replace(/<\/?(?:html|head|body)\b[^>]*>/gi, "");
+    processed = processed.replace(/<(https?:\/\/[^\s<>]+)>/gi, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+    processed = processed.replace(/<details\b[^>]*>/gi, `
+
+$&
+
+`).replace(/<\/details\s*>/gi, `
+
+$&
+
+`).replace(/<summary\b[^>]*>[\s\S]*?<\/summary\s*>/gi, `
+
+$&
+
+`).replace(/<link\b[^>]*>/gi, `
+
+$&
+
+`);
     const blockPlaceholders = [];
-    const blockTagNames = new Set(["div", "section", "article", "header", "footer", "aside", "nav", "main", "style", "table", "figure", "form", "fieldset", "details", "summary", "blockquote"]);
+    const blockTagNames = new Set(["div", "section", "article", "header", "footer", "aside", "nav", "main", "style", "pre", "table", "figure", "form", "fieldset", "summary"]);
     let newProcessed = "";
     const tagScannerRe = /<(\/?)\s*([a-zA-Z0-9-]+)\b(?:[^>'"]|"[^"]*"|'[^']*')*>/g;
     let cursor = 0;
@@ -966,12 +1201,26 @@ function renderContent(rawHtml, charName) {
           }
         }
         if (depth > 0) {
-          blockEnd = processed.length;
+          if (tagName === "style" || tagName === "pre") {
+            blockEnd = processed.length;
+          } else {
+            newProcessed += `
+
+${match[0]}
+
+`;
+            cursor = match.index + match[0].length;
+            continue;
+          }
         }
-        const blockStr = processed.slice(match.index, blockEnd);
+        const blockStr = processHtmlBlockInlineMarkdown(processed.slice(match.index, blockEnd));
         const idx = blockPlaceholders.length;
         blockPlaceholders.push(blockStr);
-        newProcessed += `\x00BLK${idx}\x00`;
+        newProcessed += `
+
+\x00BLK${idx}\x00
+
+`;
         cursor = blockEnd;
       } else {
         newProcessed += processed.slice(cursor, match.index + match[0].length);
@@ -980,7 +1229,7 @@ function renderContent(rawHtml, charName) {
     }
     processed = newProcessed;
     const inlinePlaceholders = [];
-    processed = processed.replace(/<[^>]+>/g, (m) => {
+    processed = processed.replace(/<code\b[^>]*>[\s\S]*?<\/code\s*>|<[^>]+>/gi, (m) => {
       const idx = inlinePlaceholders.length;
       inlinePlaceholders.push(m);
       return `\x00INL${idx}\x00`;
@@ -1015,12 +1264,12 @@ function renderContent(rawHtml, charName) {
 <h1>$1</h1>
 
 `);
-    processed = processed.replace(/^(?!\x00BLK\d+\x00)(.+)\n={3,}$/gm, `
+    processed = processed.replace(/^(?!\x00(?:BLK|INL)\d+\x00)(.+)\n={3,}$/gm, `
 
 <h1>$1</h1>
 
 `);
-    processed = processed.replace(/^(?!\x00BLK\d+\x00)(.+)\n-{3,}$/gm, `
+    processed = processed.replace(/^(?!\x00(?:BLK|INL)\d+\x00)(.+)\n-{3,}$/gm, `
 
 <h2>$1</h2>
 
@@ -1042,60 +1291,85 @@ function renderContent(rawHtml, charName) {
 `);
     const listOutput = [];
     const listStack = [];
-    for (const line of listLines) {
-      const ulMatch = line.match(/^(\s*)[*+\-]\s+(.*)$/);
-      const olMatch = line.match(/^(\s*)\d+\.\s+(.*)$/);
-      if (ulMatch) {
-        if (!listStack.length || listStack[listStack.length - 1] !== "ul") {
-          listOutput.push("<ul>");
-          listStack.push("ul");
+    const matchListLine = (ln) => {
+      const ul = ln.match(/^(\s*)[*+\-]\s+(.*)$/);
+      if (ul)
+        return { type: "ul", indent: ul[1].replace(/\t/g, "  ").length, content: ul[2] };
+      const ol = ln.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      if (ol)
+        return { type: "ol", indent: ol[1].replace(/\t/g, "  ").length, num: parseInt(ol[2], 10), content: ol[3] };
+      return null;
+    };
+    const openListTag = (type, num) => {
+      if (type === "ol" && num !== undefined && num !== 1)
+        return `<ol start="${num}">`;
+      return `<${type}>`;
+    };
+    for (let i = 0;i < listLines.length; i++) {
+      const line = listLines[i];
+      const item = matchListLine(line);
+      if (item) {
+        if (listStack.length === 0) {
+          listOutput.push("");
+          listOutput.push(openListTag(item.type, item.num));
+          listStack.push({ type: item.type, indent: item.indent });
+        } else {
+          while (listStack.length > 1 && item.indent < listStack[listStack.length - 1].indent) {
+            listOutput.push(`</${listStack.pop().type}>`);
+          }
+          const top = listStack[listStack.length - 1];
+          if (item.indent >= top.indent + 2) {
+            listOutput.push(openListTag(item.type, item.num));
+            listStack.push({ type: item.type, indent: item.indent });
+          } else if (top.type !== item.type) {
+            listOutput.push(`</${listStack.pop().type}>`);
+            if (listStack.length === 0)
+              listOutput.push("");
+            listOutput.push(openListTag(item.type, item.num));
+            listStack.push({ type: item.type, indent: item.indent });
+          }
         }
-        listOutput.push(`<li>${ulMatch[2]}</li>`);
-      } else if (olMatch) {
-        if (!listStack.length || listStack[listStack.length - 1] !== "ol") {
-          listOutput.push("<ol>");
-          listStack.push("ol");
+        listOutput.push(`<li>${item.content}</li>`);
+      } else if (listStack.length > 0 && line.trim() === "") {
+        const nextLine = i + 1 < listLines.length ? listLines[i + 1] : "";
+        if (matchListLine(nextLine)) {
+          continue;
         }
-        listOutput.push(`<li>${olMatch[2]}</li>`);
-      } else {
         while (listStack.length)
-          listOutput.push(`</${listStack.pop()}>`);
+          listOutput.push(`</${listStack.pop().type}>`);
+        listOutput.push("");
+        listOutput.push(line);
+      } else {
+        if (listStack.length > 0) {
+          while (listStack.length)
+            listOutput.push(`</${listStack.pop().type}>`);
+          listOutput.push("");
+        }
         listOutput.push(line);
       }
     }
-    while (listStack.length)
-      listOutput.push(`</${listStack.pop()}>`);
+    if (listStack.length > 0) {
+      while (listStack.length)
+        listOutput.push(`</${listStack.pop().type}>`);
+      listOutput.push("");
+    }
     processed = listOutput.join(`
 `);
-    processed = processed.replace(/`([^`\n]+?)`/g, (_, c) => `<code>${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`);
-    processed = processed.replace(/\*{3}([^*\n]+?)\*{3}/g, "<strong><em>$1</em></strong>");
-    processed = processed.replace(/\*{2}([^*\n]+?)\*{2}/g, "<strong>$1</strong>");
-    processed = processed.replace(/\*([^*\n]+?)\*/g, "<em>$1</em>");
-    processed = processed.replace(/(?<![\w])_{3}([^_\n]+?)_{3}(?![\w])/g, "<strong><em>$1</em></strong>");
-    processed = processed.replace(/(?<![\w])_{2}([^_\n]+?)_{2}(?![\w])/g, "<strong>$1</strong>");
-    processed = processed.replace(/(?<![\w])_([^_\n]+?)_(?![\w])/g, "<em>$1</em>");
-    processed = processed.replace(/~~([^~\n]+?)~~/g, "<s>$1</s>");
-    processed = processed.replace(/\[!\[([^\]]*)\]\(([^)\s]+)(?:\s*=[^)]*)?(?:\s+"[^"]*")?\)\]\(([^)]+)\)/g, (_, alt, imgSrc, linkHref) => {
-      if (!imgSrc.match(/^(https?:\/\/|\/)/i))
-        return _;
-      const altAttr = alt ? ` alt="${alt.replace(/"/g, "&quot;")}"` : "";
-      const safeLink = linkHref.match(/^https?:\/\//i) ? linkHref : "#";
-      return `<a href="${safeLink}" target="_blank" rel="noopener"><img src="${imgSrc}"${altAttr} referrerpolicy="no-referrer" loading="lazy"></a>`;
-    });
-    processed = processed.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s*=[^)]*)?(?:\s+"[^"]*")?\)/g, (match, alt, src) => {
-      if (!src.match(/^(https?:\/\/|\/)/i))
-        return match;
-      const altAttr = alt ? ` alt="${alt.replace(/"/g, "&quot;")}"` : "";
-      return `<img src="${src}"${altAttr} referrerpolicy="no-referrer" loading="lazy">`;
-    });
-    processed = processed.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    processed = applyInlineMarkdown(processed);
     const paragraphs = processed.split(/\n{2,}/);
     processed = paragraphs.map((para) => {
       para = para.trim();
       if (!para)
         return "";
-      if (/^\x00BLK\d+\x00/.test(para))
+      if (/^\x00BLK\d+\x00$/.test(para) || /^\x00BLK\d+\x00/.test(para))
         return para;
+      const leadingInlMatch = para.match(/^\x00INL(\d+)\x00/);
+      if (leadingInlMatch) {
+        const tag = inlinePlaceholders[+leadingInlMatch[1]] || "";
+        if (/^<\/?(p|details|blockquote|div|section|article|header|footer|hr|link|ul|ol|li|table|h[1-6])\b/i.test(tag)) {
+          return para;
+        }
+      }
       if (/^<(h[1-6]|ul|ol|li|blockquote|pre|hr|table|div|p|section|article|header|footer)[^>]*>/i.test(para))
         return para;
       if (/<(h[1-6]|ul|ol|blockquote|pre|hr|table)[^>]*>/i.test(para))
@@ -1106,8 +1380,7 @@ function renderContent(rawHtml, charName) {
     processed = processed.replace(/\x00INL(\d+)\x00/g, (_, i) => inlinePlaceholders[+i]);
     processed = processed.replace(/\x00BLK(\d+)\x00/g, (_, i) => blockPlaceholders[+i]);
   }
-  const safe = sanitize(processed);
-  const hardened = safe.replace(/<img(?![^>]*referrerpolicy)\s/gi, '<img referrerpolicy="no-referrer" ').replace(/<video(?![^>]*referrerpolicy)\s/gi, '<video referrerpolicy="no-referrer" ').replace(/<audio(?![^>]*referrerpolicy)\s/gi, '<audio referrerpolicy="no-referrer" ');
+  const hardened = sanitize(processed);
   const hasOwnStyles = /<style[^>]*>[\s\S]*?<\/style>/i.test(hardened);
   const universalBase = `<style>
     *, *::before, *::after { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color 0.2s ease; }
@@ -1134,8 +1407,8 @@ function renderContent(rawHtml, charName) {
     h2 { color:#4a9eff; margin:12px 0 8px; font-size:1.4em; }
     h3 { color:#4a9eff; margin:10px 0 6px; font-size:1.2em; }
     h4,h5,h6 { color:#4a9eff; margin:8px 0 4px; font-size:1.1em; }
-    strong, b { color:#fff; }
-    em, i { color:#ddd; font-style:italic; }
+    strong, b { font-weight:bold; }
+    em, i { font-style:italic; }
     p { margin:0 0 0.8em; }
     blockquote { margin:10px 0; padding:10px 15px; border-left:3px solid #4a9eff; background:rgba(74,158,255,calc(0.06 * var(--cnv-opacity, 1))); border-radius:0 6px 6px 0; }
     pre { background:rgba(0,0,0,calc(0.3 * var(--cnv-opacity, 1))); padding:10px; border-radius:6px; overflow-x:auto; white-space:pre-wrap; word-wrap:break-word; }
@@ -1194,21 +1467,50 @@ var currentWidgetState = {
   opacity: 100
 };
 var spindleCtx = null;
+var saveDebounceTimer = null;
+var hasLocalModifications = false;
 function setSpindleContext(ctx) {
   spindleCtx = ctx;
+  hasLocalModifications = false;
 }
-function saveState() {
+function flushSaveStateToBackend() {
+  if (saveDebounceTimer !== null) {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = null;
+  }
   if (spindleCtx) {
     spindleCtx.sendToBackend({
       type: "SAVE_STATE",
       state: currentWidgetState
     });
   }
+}
+function saveState(immediate = false) {
+  hasLocalModifications = true;
   try {
     localStorage.setItem("cnv_widget_state_v2", JSON.stringify(currentWidgetState));
   } catch (_) {}
+  if (immediate) {
+    flushSaveStateToBackend();
+    return;
+  }
+  if (saveDebounceTimer !== null) {
+    clearTimeout(saveDebounceTimer);
+  }
+  saveDebounceTimer = setTimeout(() => {
+    saveDebounceTimer = null;
+    if (spindleCtx) {
+      spindleCtx.sendToBackend({
+        type: "SAVE_STATE",
+        state: currentWidgetState
+      });
+    }
+  }, 200);
 }
 function restoreWidgetState(state, popOutBtn, initialDocHtml) {
+  if (hasLocalModifications) {
+    return;
+  }
   if (state && typeof state === "object") {
     currentWidgetState = {
       ...currentWidgetState,
@@ -1223,6 +1525,16 @@ function restoreWidgetState(state, popOutBtn, initialDocHtml) {
     if (!isPillEnabled) {
       currentWidgetState.widgetMinimized = false;
     }
+    zoomCallbacks.forEach((cb) => {
+      try {
+        cb(currentWidgetState.zoom);
+      } catch (_) {}
+    });
+    opacityCallbacks.forEach((cb) => {
+      try {
+        cb(currentWidgetState.opacity);
+      } catch (_) {}
+    });
     if (currentWidgetState.widgetOpen && !isWidgetActive()) {
       openWidget(popOutBtn, initialDocHtml);
     }
@@ -1231,6 +1543,7 @@ function restoreWidgetState(state, popOutBtn, initialDocHtml) {
       widgetEl.style.top = `${currentWidgetState.widgetGeom.top}px`;
       widgetEl.style.width = `${currentWidgetState.widgetGeom.width}px`;
       widgetEl.style.height = `${currentWidgetState.widgetGeom.height}px`;
+      applyOpacityToWidget(widgetEl, currentWidgetState.opacity);
       updatePillPresence();
       if (currentWidgetState.widgetMinimized && isPillEnabled) {
         widgetEl.style.display = "none";
@@ -1546,8 +1859,9 @@ function toggleWidgetFullscreen() {
     widgetEl.classList.add("fullscreen");
   } else {
     widgetEl.classList.remove("fullscreen");
-    const savedW = currentWidgetState.widgetGeom.width;
-    const savedH = currentWidgetState.widgetGeom.height;
+    const { left: savedL, top: savedT, width: savedW, height: savedH } = currentWidgetState.widgetGeom;
+    widgetEl.style.left = `${savedL}px`;
+    widgetEl.style.top = `${savedT}px`;
     widgetEl.style.width = `${savedW}px`;
     widgetEl.style.height = `${savedH}px`;
   }
@@ -1585,21 +1899,24 @@ function adjustPillContent(width) {
   }
 }
 function handleGlobalKeyDown(e) {
-  const key = e.key.toLowerCase();
-  if (key === "escape" || key === "x") {
-    const activeEl = document.activeElement;
-    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable)) {
-      return;
-    }
-    if (e.key === "Escape" && isWidgetFullscreen) {
-      toggleWidgetFullscreen();
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey)
+    return;
+  if (e.key !== "Escape")
+    return;
+  if (!widgetEl || widgetEl.style.display === "none")
+    return;
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.tagName === "SELECT" || activeEl.isContentEditable || activeEl.closest("[role='dialog'], dialog"))) {
+    return;
+  }
+  if (isWidgetFullscreen) {
+    toggleWidgetFullscreen();
+  } else {
+    const popOutBtn = document.querySelector(".cnv-toolbar-btn[data-tooltip*='Pop out'], .cnv-toolbar-btn[data-tooltip*='Close Pop-out']");
+    if (isPillEnabled) {
+      toggleWidgetState();
     } else {
-      const popOutBtn = document.querySelector(".cnv-toolbar-btn[data-tooltip*='Pop out'], .cnv-toolbar-btn[data-tooltip*='Close Pop-out']");
-      if (isPillEnabled && widgetEl && widgetEl.style.display !== "none") {
-        toggleWidgetState();
-      } else {
-        closeWidget(popOutBtn);
-      }
+      closeWidget(popOutBtn);
     }
   }
 }
@@ -1631,9 +1948,9 @@ function updateCloseBtnTooltip() {
   if (!closeBtn)
     return;
   if (isPillEnabled) {
-    closeBtn.setAttribute("data-tooltip", "Minimize to Pill (Esc, X)");
+    closeBtn.setAttribute("data-tooltip", "Minimize to Pill (Esc)");
   } else {
-    closeBtn.setAttribute("data-tooltip", "Close Widget (Esc, X)");
+    closeBtn.setAttribute("data-tooltip", "Close Widget (Esc)");
   }
 }
 function updatePillPresence() {
@@ -1857,6 +2174,7 @@ function closeWidget(popOutBtn) {
     pillBtn = null;
     closeBtn = null;
   }
+  isWidgetFullscreen = false;
   if (popOutBtn) {
     popOutBtn.setAttribute("data-tooltip", "Pop out Notes (⤢)");
   }
@@ -1864,12 +2182,15 @@ function closeWidget(popOutBtn) {
   widgetAbort = null;
   if (currentWidgetState.widgetOpen) {
     currentWidgetState.widgetOpen = false;
-    saveState();
+    saveState(true);
+  } else {
+    flushSaveStateToBackend();
   }
 }
 function openWidget(popOutBtn, initialDocHtml) {
   if (pillEl || widgetEl)
     return;
+  isWidgetFullscreen = false;
   popOutBtn.setAttribute("data-tooltip", "Close Pop-out Widget");
   currentDocHtml = initialDocHtml;
   widgetAbort = new AbortController;
@@ -1908,9 +2229,9 @@ function openWidget(popOutBtn, initialDocHtml) {
   bottomEdge.className = "cnv-widget-edge cnv-edge-bottom";
   widgetEl.appendChild(bottomEdge);
   let isDragging = false;
+  let hasDragged = false;
   let dragStartX = 0, dragStartY = 0;
   let dragStartLeft = 0, dragStartTop = 0;
-  let isClickCandidate = false;
   widgetEl.addEventListener("mousedown", (e) => {
     const target = e.target;
     if (!target.closest(".cnv-widget-edge") || target.closest(".cnv-toolbar-btn"))
@@ -1918,7 +2239,7 @@ function openWidget(popOutBtn, initialDocHtml) {
     if (isWidgetFullscreen)
       return;
     isDragging = true;
-    isClickCandidate = true;
+    hasDragged = false;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
     const rect = widgetEl.getBoundingClientRect();
@@ -1929,13 +2250,23 @@ function openWidget(popOutBtn, initialDocHtml) {
     }
     e.preventDefault();
   });
+  widgetEl.addEventListener("dblclick", (e) => {
+    const target = e.target;
+    if (!target.closest(".cnv-widget-edge") || target.closest(".cnv-toolbar-btn"))
+      return;
+    if (isWidgetFullscreen)
+      return;
+    if (isPillEnabled) {
+      toggleWidgetState();
+    }
+  });
   const onMouseMove = (e) => {
     if (!isDragging || !widgetEl)
       return;
     const dx = e.clientX - dragStartX;
     const dy = e.clientY - dragStartY;
-    if (isClickCandidate && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-      isClickCandidate = false;
+    if (!hasDragged && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+      hasDragged = true;
     }
     if (isWidgetLocked)
       return;
@@ -1948,6 +2279,8 @@ function openWidget(popOutBtn, initialDocHtml) {
       if (widgetIframe) {
         widgetIframe.style.pointerEvents = "auto";
       }
+      if (!hasDragged || isWidgetLocked)
+        return;
       let finalLeft = parseInt(widgetEl.style.left, 10);
       let finalTop = parseInt(widgetEl.style.top, 10);
       const currentW = parseInt(widgetEl.style.width, 10) || DEFAULT_WIDGET_WIDTH;
@@ -1964,13 +2297,7 @@ function openWidget(popOutBtn, initialDocHtml) {
       finalTop = Math.max(0, Math.min(window.innerHeight - currentH, finalTop));
       widgetEl.style.left = `${finalLeft}px`;
       widgetEl.style.top = `${finalTop}px`;
-      if (isClickCandidate) {
-        if (isPillEnabled) {
-          toggleWidgetState();
-        }
-      } else {
-        saveWidgetGeom();
-      }
+      saveWidgetGeom();
     }
   };
   window.addEventListener("mousemove", onMouseMove, { signal: widgetSignal });
@@ -2072,7 +2399,7 @@ function openWidget(popOutBtn, initialDocHtml) {
   const content = document.createElement("div");
   content.className = "cnv-widget-content";
   widgetIframe = document.createElement("iframe");
-  widgetIframe.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+  widgetIframe.setAttribute("sandbox", "allow-same-origin allow-popups");
   widgetIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
   widgetIframe.addEventListener("load", () => {
     if (widgetIframe) {
@@ -2172,6 +2499,27 @@ function openWidget(popOutBtn, initialDocHtml) {
       launcher.classList.remove("transparent");
   }
   document.body.appendChild(widgetEl);
+  const onWindowResize = () => {
+    if (widgetEl && !isWidgetFullscreen) {
+      const currentW = Math.min(window.innerWidth, parseInt(widgetEl.style.width, 10) || DEFAULT_WIDGET_WIDTH);
+      const currentH = Math.min(window.innerHeight, parseInt(widgetEl.style.height, 10) || DEFAULT_WIDGET_HEIGHT);
+      const curLeft = parseInt(widgetEl.style.left, 10) || 0;
+      const curTop = parseInt(widgetEl.style.top, 10) || 0;
+      const clampedLeft = Math.max(0, Math.min(window.innerWidth - currentW, curLeft));
+      const clampedTop = Math.max(0, Math.min(window.innerHeight - currentH, curTop));
+      widgetEl.style.left = `${clampedLeft}px`;
+      widgetEl.style.top = `${clampedTop}px`;
+    }
+    if (pillEl) {
+      const pW = parseInt(pillEl.style.width, 10) || PILL_WIDTH;
+      const pH = parseInt(pillEl.style.height, 10) || PILL_HEIGHT;
+      const pLeft = parseInt(pillEl.style.left, 10) || 0;
+      const pTop = parseInt(pillEl.style.top, 10) || 0;
+      pillEl.style.left = `${Math.max(0, Math.min(window.innerWidth - pW, pLeft))}px`;
+      pillEl.style.top = `${Math.max(0, Math.min(window.innerHeight - pH, pTop))}px`;
+    }
+  };
+  window.addEventListener("resize", onWindowResize, { signal: widgetSignal });
   window.addEventListener("keydown", handleGlobalKeyDown, { signal: widgetSignal });
 }
 
@@ -2190,6 +2538,7 @@ function setup(ctx) {
   });
   const removeStyle = ctx.dom.addStyle(STYLES);
   const root = tab.root;
+  root.classList.add("cnv-drawer-root");
   root.style.cssText = "height:100%;width:100%;overflow:hidden;position:relative;";
   const iframeContainer = document.createElement("div");
   iframeContainer.style.cssText = "width:100%;height:100%;border:none;background:transparent;";
@@ -2222,7 +2571,7 @@ function setup(ctx) {
     if (isWidgetActive()) {
       closeWidget(popOutBtn);
     } else {
-      openWidget(popOutBtn, currentDocHtml2);
+      openWidget(popOutBtn, currentDocHtml);
     }
   });
   mainToolbar.appendChild(popOutBtn);
@@ -2254,88 +2603,235 @@ function setup(ctx) {
     }
   };
   document.addEventListener("mousedown", onOutsideClick);
-  registerOnZoomChanged((zoom) => {
+  const onMainZoomChanged = (zoom) => {
     if (mainIframe) {
       applyZoomToIframe(mainIframe, zoom);
     }
-  });
-  registerOnOpacityChanged((opacity) => {
+  };
+  registerOnZoomChanged(onMainZoomChanged);
+  const onMainOpacityChanged = (opacity) => {
     if (mainIframe) {
       applyOpacityToIframe(mainIframe, opacity);
     }
-  });
+  };
+  registerOnOpacityChanged(onMainOpacityChanged);
   let mainIframe = null;
-  let currentDocHtml2 = "";
+  let mainIframeLoading = false;
+  let currentDocHtml = "";
   let lastCreatorNotes = "";
   let lastCharName = "";
+  let lastCharacterId = null;
+  let loadSeq = 0;
+  let pendingCharRetryTimer = null;
+  let pendingCharRetries = 0;
+  function clearPendingCharRetry() {
+    if (pendingCharRetryTimer !== null) {
+      clearTimeout(pendingCharRetryTimer);
+      pendingCharRetryTimer = null;
+    }
+    pendingCharRetries = 0;
+  }
   function showError(msg) {
     mainIframe = null;
+    mainIframeLoading = false;
     lastCreatorNotes = "";
     lastCharName = "";
-    iframeContainer.innerHTML = `<p style="color:#f87171;padding:12px;font-family:sans-serif;">${msg}</p>`;
+    lastCharacterId = null;
+    const p = document.createElement("p");
+    p.style.cssText = "color:#f87171;padding:12px;font-family:sans-serif;margin:0;";
+    p.textContent = msg;
+    iframeContainer.replaceChildren(p);
+    currentDocHtml = renderStatusContent(msg, true);
+    updateWidgetContent(currentDocHtml);
   }
   function showPlaceholder(msg) {
     mainIframe = null;
+    mainIframeLoading = false;
     lastCreatorNotes = "";
     lastCharName = "";
-    iframeContainer.innerHTML = `<p style="opacity:0.5;padding:12px;font-family:sans-serif;">${msg}</p>`;
+    lastCharacterId = null;
+    const p = document.createElement("p");
+    p.style.cssText = "opacity:0.5;padding:12px;font-family:sans-serif;margin:0;";
+    p.textContent = msg;
+    iframeContainer.replaceChildren(p);
+    currentDocHtml = renderStatusContent(msg, false);
+    updateWidgetContent(currentDocHtml);
+  }
+  function isMainIframeAlive() {
+    if (!mainIframe || mainIframe.parentElement !== iframeContainer || !mainIframe.isConnected) {
+      return false;
+    }
+    if (mainIframeLoading) {
+      return true;
+    }
+    try {
+      const body = mainIframe.contentDocument?.body;
+      return Boolean(body && body.childNodes.length > 0);
+    } catch {
+      return true;
+    }
+  }
+  const charEditorApi = ctx.ui.characterEditor;
+  function resolveActiveCharacterId() {
+    const activeChat = ctx.getActiveChat();
+    if (activeChat.characterId) {
+      return activeChat;
+    }
+    try {
+      const editorState = charEditorApi?.getState?.();
+      if (editorState?.open && editorState.characterId) {
+        return { chatId: activeChat.chatId, characterId: editorState.characterId };
+      }
+    } catch (_) {}
+    return activeChat;
   }
   async function loadCreatorNotes() {
-    const activeChat = ctx.getActiveChat();
+    const activeChat = resolveActiveCharacterId();
     const characterId = activeChat.characterId;
     if (!characterId) {
+      if (activeChat.chatId && pendingCharRetries < 20) {
+        if (pendingCharRetryTimer === null) {
+          pendingCharRetries++;
+          pendingCharRetryTimer = setTimeout(() => {
+            pendingCharRetryTimer = null;
+            loadCreatorNotes();
+          }, 100);
+        }
+        return;
+      }
+      clearPendingCharRetry();
       showPlaceholder("Open a chat to see the character's Creator Notes here.");
       return;
     }
+    clearPendingCharRetry();
+    const seq = ++loadSeq;
     try {
       const card = await ctx.characters.get(characterId);
+      if (seq !== loadSeq)
+        return;
       const creatorNotes = card?.creator_notes ?? card?.data?.creator_notes ?? "";
       const charName = card?.name ?? "";
       if (!creatorNotes) {
         showPlaceholder(`No Creator Notes for ${charName || "this character"}.`);
-      } else if (creatorNotes === lastCreatorNotes && charName === lastCharName) {
+      } else if (characterId === lastCharacterId && creatorNotes === lastCreatorNotes && charName === lastCharName && isMainIframeAlive()) {
         return;
       } else {
+        lastCharacterId = characterId;
         lastCreatorNotes = creatorNotes;
         lastCharName = charName;
         const doc = renderContent(creatorNotes, charName);
-        if (!mainIframe || mainIframe.parentElement !== iframeContainer) {
-          iframeContainer.innerHTML = "";
-          mainIframe = document.createElement("iframe");
-          mainIframe.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
-          mainIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
-          mainIframe.addEventListener("load", () => {
-            if (mainIframe) {
-              applyZoomToIframe(mainIframe, getZoom());
-              applyOpacityToIframe(mainIframe, getOpacity());
-            }
-          });
-          iframeContainer.appendChild(mainIframe);
-        }
-        mainIframe.srcdoc = doc;
-        currentDocHtml2 = doc;
+        iframeContainer.replaceChildren();
+        mainIframe = document.createElement("iframe");
+        mainIframe.setAttribute("sandbox", "allow-same-origin allow-popups");
+        mainIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
+        const createdIframe = mainIframe;
+        mainIframeLoading = root.isConnected;
+        createdIframe.addEventListener("load", () => {
+          if (mainIframe === createdIframe) {
+            mainIframeLoading = false;
+            applyZoomToIframe(createdIframe, getZoom());
+            applyOpacityToIframe(createdIframe, getOpacity());
+          }
+        });
+        createdIframe.srcdoc = doc;
+        iframeContainer.appendChild(createdIframe);
+        currentDocHtml = doc;
         updateWidgetContent(doc);
       }
     } catch (err) {
+      if (seq !== loadSeq)
+        return;
       showError(`Failed to read Creator Notes: ${err}`);
     }
   }
   loadCreatorNotes();
-  const unsubActivate = tab.onActivate(() => loadCreatorNotes());
+  let rafActivateId = null;
+  const unsubActivate = tab.onActivate(() => {
+    loadCreatorNotes();
+    if (rafActivateId !== null)
+      cancelAnimationFrame(rafActivateId);
+    rafActivateId = requestAnimationFrame(() => {
+      rafActivateId = null;
+      loadCreatorNotes();
+    });
+  });
+  let wasRootVisible = false;
+  const rootResizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver((entries) => {
+    const entry = entries[0];
+    const isVisible = Boolean(root.isConnected && entry && entry.contentRect.width > 0 && entry.contentRect.height > 0);
+    if (!isVisible) {
+      mainIframeLoading = false;
+    } else if (!wasRootVisible) {
+      loadCreatorNotes();
+    }
+    wasRootVisible = isVisible;
+  }) : null;
+  rootResizeObserver?.observe(root);
   const unsubChatSwitched = ctx.events.on("CHAT_SWITCHED", () => loadCreatorNotes());
-  const unsubCharEdited = ctx.events.on("CHARACTER_EDITED", () => loadCreatorNotes());
+  const unsubChatChanged = ctx.events.on("CHAT_CHANGED", () => loadCreatorNotes());
+  const unsubCharEdited = ctx.events.on("CHARACTER_EDITED", () => {
+    lastCharacterId = null;
+    loadCreatorNotes();
+  });
+  let unsubCharEditorState = null;
+  try {
+    if (charEditorApi && typeof charEditorApi.onChange === "function") {
+      unsubCharEditorState = charEditorApi.onChange(() => loadCreatorNotes());
+    }
+  } catch (_) {}
+  let unsubActiveChatState = null;
+  let activeChatPollTimer = null;
+  const stateApi = ctx.state;
+  try {
+    if (stateApi && typeof stateApi.subscribe === "function") {
+      unsubActiveChatState = stateApi.subscribe("chat.active", () => loadCreatorNotes());
+    }
+  } catch (_) {}
+  if (!unsubActiveChatState) {
+    let prevChatId = resolveActiveCharacterId().chatId;
+    let prevCharId = resolveActiveCharacterId().characterId;
+    activeChatPollTimer = setInterval(() => {
+      const cur = resolveActiveCharacterId();
+      if (cur.chatId !== prevChatId || cur.characterId !== prevCharId) {
+        prevChatId = cur.chatId;
+        prevCharId = cur.characterId;
+        loadCreatorNotes();
+      }
+    }, 250);
+  }
   const unsubMsg = ctx.onBackendMessage((payload) => {
     if (payload && payload.type === "STATE_DATA") {
-      restoreWidgetState(payload.state, popOutBtn, currentDocHtml2);
+      restoreWidgetState(payload.state, popOutBtn, currentDocHtml);
     }
   });
   ctx.sendToBackend({ type: "LOAD_STATE" });
   return () => {
+    clearPendingCharRetry();
+    if (rafActivateId !== null) {
+      cancelAnimationFrame(rafActivateId);
+      rafActivateId = null;
+    }
+    if (activeChatPollTimer !== null) {
+      clearInterval(activeChatPollTimer);
+      activeChatPollTimer = null;
+    }
+    try {
+      rootResizeObserver?.disconnect();
+    } catch (_) {}
+    try {
+      unsubCharEditorState?.();
+    } catch (_) {}
+    try {
+      unsubActiveChatState?.();
+    } catch (_) {}
     try {
       unsubActivate();
     } catch (_) {}
     try {
       unsubChatSwitched();
+    } catch (_) {}
+    try {
+      unsubChatChanged();
     } catch (_) {}
     try {
       unsubCharEdited();
@@ -2352,6 +2848,8 @@ function setup(ctx) {
     try {
       closeWidget(popOutBtn);
     } catch (_) {}
+    unregisterOnZoomChanged(onMainZoomChanged);
+    unregisterOnOpacityChanged(onMainOpacityChanged);
     document.removeEventListener("mousedown", onOutsideClick);
     if (settingsMenuEl) {
       if (typeof settingsMenuEl._cleanup === "function") {

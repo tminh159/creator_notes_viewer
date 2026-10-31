@@ -65,24 +65,56 @@ export let currentWidgetState: WidgetState = {
 };
 
 let spindleCtx: SpindleFrontendContext | null = null;
+let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let hasLocalModifications = false;
 
 export function setSpindleContext(ctx: SpindleFrontendContext) {
   spindleCtx = ctx;
+  hasLocalModifications = false;
 }
 
-function saveState() {
+function flushSaveStateToBackend() {
+  if (saveDebounceTimer !== null) {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = null;
+  }
   if (spindleCtx) {
     spindleCtx.sendToBackend({
       type: "SAVE_STATE",
       state: currentWidgetState
     });
   }
+}
+
+function saveState(immediate = false) {
+  hasLocalModifications = true;
   try {
     localStorage.setItem("cnv_widget_state_v2", JSON.stringify(currentWidgetState));
   } catch (_) {}
+
+  if (immediate) {
+    flushSaveStateToBackend();
+    return;
+  }
+
+  if (saveDebounceTimer !== null) {
+    clearTimeout(saveDebounceTimer);
+  }
+  saveDebounceTimer = setTimeout(() => {
+    saveDebounceTimer = null;
+    if (spindleCtx) {
+      spindleCtx.sendToBackend({
+        type: "SAVE_STATE",
+        state: currentWidgetState
+      });
+    }
+  }, 200);
 }
 
 export function restoreWidgetState(state: Partial<WidgetState> | null, popOutBtn: HTMLButtonElement, initialDocHtml: string) {
+  if (hasLocalModifications) {
+    return;
+  }
   if (state && typeof state === "object") {
     currentWidgetState = {
       ...currentWidgetState,
@@ -99,6 +131,13 @@ export function restoreWidgetState(state: Partial<WidgetState> | null, popOutBtn
       currentWidgetState.widgetMinimized = false;
     }
 
+    zoomCallbacks.forEach(cb => {
+      try { cb(currentWidgetState.zoom); } catch (_) {}
+    });
+    opacityCallbacks.forEach(cb => {
+      try { cb(currentWidgetState.opacity); } catch (_) {}
+    });
+
     if (currentWidgetState.widgetOpen && !isWidgetActive()) {
       openWidget(popOutBtn, initialDocHtml);
     }
@@ -108,6 +147,7 @@ export function restoreWidgetState(state: Partial<WidgetState> | null, popOutBtn
       widgetEl.style.top = `${currentWidgetState.widgetGeom.top}px`;
       widgetEl.style.width = `${currentWidgetState.widgetGeom.width}px`;
       widgetEl.style.height = `${currentWidgetState.widgetGeom.height}px`;
+      applyOpacityToWidget(widgetEl, currentWidgetState.opacity);
 
       updatePillPresence();
 
@@ -459,9 +499,10 @@ function toggleWidgetFullscreen() {
     widgetEl.classList.add("fullscreen");
   } else {
     widgetEl.classList.remove("fullscreen");
-    // Restore non-fullscreen dimensions
-    const savedW = currentWidgetState.widgetGeom.width;
-    const savedH = currentWidgetState.widgetGeom.height;
+    // Restore non-fullscreen position and dimensions
+    const { left: savedL, top: savedT, width: savedW, height: savedH } = currentWidgetState.widgetGeom;
+    widgetEl.style.left = `${savedL}px`;
+    widgetEl.style.top = `${savedT}px`;
     widgetEl.style.width = `${savedW}px`;
     widgetEl.style.height = `${savedH}px`;
   }
@@ -499,22 +540,30 @@ function adjustPillContent(width: number) {
 }
 
 function handleGlobalKeyDown(e: KeyboardEvent) {
-  const key = e.key.toLowerCase();
-  if (key === "escape" || key === "x") {
-    const activeEl = document.activeElement as HTMLElement | null;
-    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable)) {
-      return;
-    }
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key !== "Escape") return;
+  if (!widgetEl || widgetEl.style.display === "none") return;
 
-    if (e.key === "Escape" && isWidgetFullscreen) {
-      toggleWidgetFullscreen();
+  const activeEl = document.activeElement as HTMLElement | null;
+  if (
+    activeEl &&
+    (activeEl.tagName === "INPUT" ||
+      activeEl.tagName === "TEXTAREA" ||
+      activeEl.tagName === "SELECT" ||
+      activeEl.isContentEditable ||
+      activeEl.closest("[role='dialog'], dialog"))
+  ) {
+    return;
+  }
+
+  if (isWidgetFullscreen) {
+    toggleWidgetFullscreen();
+  } else {
+    const popOutBtn = document.querySelector(".cnv-toolbar-btn[data-tooltip*='Pop out'], .cnv-toolbar-btn[data-tooltip*='Close Pop-out']") as HTMLButtonElement;
+    if (isPillEnabled) {
+      toggleWidgetState();
     } else {
-      const popOutBtn = document.querySelector(".cnv-toolbar-btn[data-tooltip*='Pop out'], .cnv-toolbar-btn[data-tooltip*='Close Pop-out']") as HTMLButtonElement;
-      if (isPillEnabled && widgetEl && widgetEl.style.display !== "none") {
-        toggleWidgetState();
-      } else {
-        closeWidget(popOutBtn);
-      }
+      closeWidget(popOutBtn);
     }
   }
 }
@@ -546,9 +595,9 @@ function updatePillBtnIcon() {
 function updateCloseBtnTooltip() {
   if (!closeBtn) return;
   if (isPillEnabled) {
-    closeBtn.setAttribute("data-tooltip", "Minimize to Pill (Esc, X)");
+    closeBtn.setAttribute("data-tooltip", "Minimize to Pill (Esc)");
   } else {
-    closeBtn.setAttribute("data-tooltip", "Close Widget (Esc, X)");
+    closeBtn.setAttribute("data-tooltip", "Close Widget (Esc)");
   }
 }
 
@@ -801,6 +850,7 @@ export function closeWidget(popOutBtn?: HTMLButtonElement | null) {
     pillBtn = null;
     closeBtn = null;
   }
+  isWidgetFullscreen = false;
   if (popOutBtn) {
     popOutBtn.setAttribute("data-tooltip", "Pop out Notes (⤢)");
   }
@@ -809,13 +859,16 @@ export function closeWidget(popOutBtn?: HTMLButtonElement | null) {
 
   if (currentWidgetState.widgetOpen) {
     currentWidgetState.widgetOpen = false;
-    saveState();
+    saveState(true);
+  } else {
+    flushSaveStateToBackend();
   }
 }
 
 export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string) {
   if (pillEl || widgetEl) return;
 
+  isWidgetFullscreen = false;
   popOutBtn.setAttribute("data-tooltip", "Close Pop-out Widget");
   currentDocHtml = initialDocHtml;
 
@@ -866,9 +919,9 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
   widgetEl.appendChild(bottomEdge);
 
   let isDragging = false;
+  let hasDragged = false;
   let dragStartX = 0, dragStartY = 0;
   let dragStartLeft = 0, dragStartTop = 0;
-  let isClickCandidate = false;
 
   widgetEl.addEventListener("mousedown", (e) => {
     const target = e.target as HTMLElement;
@@ -876,7 +929,7 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
     if (isWidgetFullscreen) return;
 
     isDragging = true;
-    isClickCandidate = true;
+    hasDragged = false;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
 
@@ -891,13 +944,22 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
     e.preventDefault();
   });
 
+  widgetEl.addEventListener("dblclick", (e) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest(".cnv-widget-edge") || target.closest(".cnv-toolbar-btn")) return;
+    if (isWidgetFullscreen) return;
+    if (isPillEnabled) {
+      toggleWidgetState();
+    }
+  });
+
   const onMouseMove = (e: MouseEvent) => {
     if (!isDragging || !widgetEl) return;
     const dx = e.clientX - dragStartX;
     const dy = e.clientY - dragStartY;
     
-    if (isClickCandidate && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-      isClickCandidate = false;
+    if (!hasDragged && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+      hasDragged = true;
     }
 
     if (isWidgetLocked) return;
@@ -912,6 +974,8 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
       if (widgetIframe) {
         widgetIframe.style.pointerEvents = "auto";
       }
+
+      if (!hasDragged || isWidgetLocked) return;
 
       let finalLeft = parseInt(widgetEl!.style.left, 10);
       let finalTop = parseInt(widgetEl!.style.top, 10);
@@ -929,13 +993,7 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
       widgetEl!.style.left = `${finalLeft}px`;
       widgetEl!.style.top = `${finalTop}px`;
 
-      if (isClickCandidate) {
-        if (isPillEnabled) {
-          toggleWidgetState();
-        }
-      } else {
-        saveWidgetGeom();
-      }
+      saveWidgetGeom();
     }
   };
 
@@ -1054,7 +1112,7 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
   content.className = "cnv-widget-content";
 
   widgetIframe = document.createElement("iframe");
-  widgetIframe.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+  widgetIframe.setAttribute("sandbox", "allow-same-origin allow-popups");
   widgetIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
   widgetIframe.addEventListener("load", () => {
     if (widgetIframe) {
@@ -1168,5 +1226,26 @@ export function openWidget(popOutBtn: HTMLButtonElement, initialDocHtml: string)
 
   document.body.appendChild(widgetEl);
 
+  const onWindowResize = () => {
+    if (widgetEl && !isWidgetFullscreen) {
+      const currentW = Math.min(window.innerWidth, parseInt(widgetEl.style.width, 10) || DEFAULT_WIDGET_WIDTH);
+      const currentH = Math.min(window.innerHeight, parseInt(widgetEl.style.height, 10) || DEFAULT_WIDGET_HEIGHT);
+      const curLeft = parseInt(widgetEl.style.left, 10) || 0;
+      const curTop = parseInt(widgetEl.style.top, 10) || 0;
+      const clampedLeft = Math.max(0, Math.min(window.innerWidth - currentW, curLeft));
+      const clampedTop = Math.max(0, Math.min(window.innerHeight - currentH, curTop));
+      widgetEl.style.left = `${clampedLeft}px`;
+      widgetEl.style.top = `${clampedTop}px`;
+    }
+    if (pillEl) {
+      const pW = parseInt(pillEl.style.width, 10) || PILL_WIDTH;
+      const pH = parseInt(pillEl.style.height, 10) || PILL_HEIGHT;
+      const pLeft = parseInt(pillEl.style.left, 10) || 0;
+      const pTop = parseInt(pillEl.style.top, 10) || 0;
+      pillEl.style.left = `${Math.max(0, Math.min(window.innerWidth - pW, pLeft))}px`;
+      pillEl.style.top = `${Math.max(0, Math.min(window.innerHeight - pH, pTop))}px`;
+    }
+  };
+  window.addEventListener("resize", onWindowResize, { signal: widgetSignal });
   window.addEventListener("keydown", handleGlobalKeyDown, { signal: widgetSignal });
 }

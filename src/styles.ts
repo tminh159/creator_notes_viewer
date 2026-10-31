@@ -12,11 +12,12 @@ export const STYLES = `
   justify-content: flex-end;
   padding: 0 10px;
   z-index: 9999;
+  pointer-events: none;
 }
 
 .cnv-toolbar-btn {
   opacity: 0;
-  pointer-events: none;
+  pointer-events: auto;
   transition: opacity var(--lumiverse-transition-fast, 0.15s) ease, background var(--lumiverse-transition-fast, 0.15s) ease, transform var(--lumiverse-transition-fast, 0.15s) ease;
   background: var(--lumiverse-bg, rgba(30, 30, 30, 0.85));
   border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.12));
@@ -31,17 +32,18 @@ export const STYLES = `
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
   margin-left: 6px;
 }
-.cnv-toolbar-btn:hover {
+.cnv-drawer-root:hover .cnv-toolbar .cnv-toolbar-btn {
+  opacity: 0.65;
+}
+.cnv-toolbar-btn:hover,
+.cnv-drawer-root:hover .cnv-toolbar .cnv-toolbar-btn:hover {
+  opacity: 1;
   background: var(--lumiverse-bg-hover, rgba(50, 50, 50, 0.95));
   color: var(--lumiverse-text, #ffffff);
   transform: translateY(-1px);
 }
 .cnv-toolbar-btn:active {
   transform: translateY(0);
-}
-.cnv-toolbar:hover .cnv-toolbar-btn {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 /* Custom tooltip */
@@ -185,21 +187,18 @@ export const STYLES = `
   left: 0;
   top: 0;
   bottom: 0;
-  width: 12px;
+  width: 10px;
 }
 
 .cnv-edge-right {
-  right: 12px;
-  top: 0;
-  bottom: 0;
-  width: 12px;
+  display: none;
 }
 
 .cnv-edge-bottom {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 12px;
+  height: 10px;
 }
 
 .cnv-widget-toolbar .cnv-toolbar-btn {
@@ -215,8 +214,13 @@ export const STYLES = `
 .cnv-widget-content {
   width: 100%;
   height: 100%;
+  padding-right: 6px;
+  box-sizing: border-box;
   overflow: hidden;
   position: relative;
+}
+.cnv-widget.fullscreen .cnv-widget-content {
+  padding-right: 0;
 }
 
 /* Resize handles */

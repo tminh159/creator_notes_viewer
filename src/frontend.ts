@@ -1,7 +1,7 @@
 import { SpindleFrontendContext, CharacterDTO } from "lumiverse-spindle-types";
 import { STYLES } from "./styles.js";
-import { renderContent } from "./markdown.js";
-import { openWidget, closeWidget, updateWidgetContent, isWidgetActive, setSpindleContext, initializeLocalState, restoreWidgetState, getZoom, setZoom, registerOnZoomChanged, applyZoomToIframe, getOpacity, setOpacity, registerOnOpacityChanged, createSettingsMenu, applyOpacityToIframe } from "./widget.js";
+import { renderContent, renderStatusContent } from "./markdown.js";
+import { openWidget, closeWidget, updateWidgetContent, isWidgetActive, setSpindleContext, initializeLocalState, restoreWidgetState, getZoom, setZoom, registerOnZoomChanged, unregisterOnZoomChanged, applyZoomToIframe, getOpacity, setOpacity, registerOnOpacityChanged, unregisterOnOpacityChanged, createSettingsMenu, applyOpacityToIframe } from "./widget.js";
 
 export function setup(ctx: SpindleFrontendContext) {
   // Store context and pre-initialize local state synchronously
@@ -21,6 +21,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const removeStyle = ctx.dom.addStyle(STYLES);
 
   const root = tab.root;
+  root.classList.add("cnv-drawer-root");
   root.style.cssText = "height:100%;width:100%;overflow:hidden;position:relative;";
 
   // Viewport container for the iframe
@@ -99,81 +100,175 @@ export function setup(ctx: SpindleFrontendContext) {
   };
   document.addEventListener("mousedown", onOutsideClick);
 
-  registerOnZoomChanged((zoom) => {
+  const onMainZoomChanged = (zoom: number) => {
     if (mainIframe) {
       applyZoomToIframe(mainIframe, zoom);
     }
-  });
+  };
+  registerOnZoomChanged(onMainZoomChanged);
 
-  registerOnOpacityChanged((opacity) => {
+  const onMainOpacityChanged = (opacity: number) => {
     if (mainIframe) {
       applyOpacityToIframe(mainIframe, opacity);
     }
-  });
+  };
+  registerOnOpacityChanged(onMainOpacityChanged);
 
   let mainIframe: HTMLIFrameElement | null = null;
+  let mainIframeLoading = false;
   let currentDocHtml = "";
   let lastCreatorNotes = "";
   let lastCharName = "";
+  let lastCharacterId: string | null = null;
+  let loadSeq = 0;
+  let pendingCharRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingCharRetries = 0;
+
+  function clearPendingCharRetry() {
+    if (pendingCharRetryTimer !== null) {
+      clearTimeout(pendingCharRetryTimer);
+      pendingCharRetryTimer = null;
+    }
+    pendingCharRetries = 0;
+  }
 
   function showError(msg: string) {
     mainIframe = null;
+    mainIframeLoading = false;
     lastCreatorNotes = "";
     lastCharName = "";
-    iframeContainer.innerHTML = `<p style="color:#f87171;padding:12px;font-family:sans-serif;">${msg}</p>`;
+    lastCharacterId = null;
+    const p = document.createElement("p");
+    p.style.cssText = "color:#f87171;padding:12px;font-family:sans-serif;margin:0;";
+    p.textContent = msg;
+    iframeContainer.replaceChildren(p);
+    currentDocHtml = renderStatusContent(msg, true);
+    updateWidgetContent(currentDocHtml);
   }
 
   function showPlaceholder(msg: string) {
     mainIframe = null;
+    mainIframeLoading = false;
     lastCreatorNotes = "";
     lastCharName = "";
-    iframeContainer.innerHTML = `<p style="opacity:0.5;padding:12px;font-family:sans-serif;">${msg}</p>`;
+    lastCharacterId = null;
+    const p = document.createElement("p");
+    p.style.cssText = "opacity:0.5;padding:12px;font-family:sans-serif;margin:0;";
+    p.textContent = msg;
+    iframeContainer.replaceChildren(p);
+    currentDocHtml = renderStatusContent(msg, false);
+    updateWidgetContent(currentDocHtml);
+  }
+
+  function isMainIframeAlive(): boolean {
+    if (!mainIframe || mainIframe.parentElement !== iframeContainer || !mainIframe.isConnected) {
+      return false;
+    }
+    if (mainIframeLoading) {
+      return true;
+    }
+    try {
+      const body = mainIframe.contentDocument?.body;
+      return Boolean(body && body.childNodes.length > 0);
+    } catch {
+      return true;
+    }
+  }
+
+  const charEditorApi = (ctx.ui as SpindleFrontendContext["ui"] & {
+    characterEditor?: {
+      getState?: () => { open?: boolean; characterId?: string | null };
+      onChange?: (cb: (state: { open?: boolean; characterId?: string | null }) => void) => () => void;
+    };
+  }).characterEditor;
+
+  function resolveActiveCharacterId(): { chatId: string | null; characterId: string | null } {
+    const activeChat = ctx.getActiveChat();
+    if (activeChat.characterId) {
+      return activeChat;
+    }
+    try {
+      const editorState = charEditorApi?.getState?.();
+      if (editorState?.open && editorState.characterId) {
+        return { chatId: activeChat.chatId, characterId: editorState.characterId };
+      }
+    } catch (_) {
+      // ignore
+    }
+    return activeChat;
   }
 
   // ── Main load function ───────────────────────────────────────────────────────
   async function loadCreatorNotes() {
-    const activeChat = ctx.getActiveChat();
+    const activeChat = resolveActiveCharacterId();
     const characterId = activeChat.characterId;
 
     if (!characterId) {
+      // When navigating to a chat, ChatView sets activeChatId first (with
+      // activeCharacterId = null) and populates activeCharacterId only after
+      // chatsApi.get(chatId) resolves. Wait briefly before showing placeholder.
+      if (activeChat.chatId && pendingCharRetries < 20) {
+        if (pendingCharRetryTimer === null) {
+          pendingCharRetries++;
+          pendingCharRetryTimer = setTimeout(() => {
+            pendingCharRetryTimer = null;
+            loadCreatorNotes();
+          }, 100);
+        }
+        return;
+      }
+      clearPendingCharRetry();
       showPlaceholder("Open a chat to see the character's Creator Notes here.");
       return;
     }
 
+    clearPendingCharRetry();
+    const seq = ++loadSeq;
+
     try {
       const card = await ctx.characters.get(characterId) as CharacterDTO & { data?: { creator_notes?: string } };
+      if (seq !== loadSeq) return;
+
       const creatorNotes: string = card?.creator_notes ?? card?.data?.creator_notes ?? "";
       const charName: string = card?.name ?? "";
 
       if (!creatorNotes) {
         showPlaceholder(`No Creator Notes for ${charName || "this character"}.`);
-      } else if (creatorNotes === lastCreatorNotes && charName === lastCharName) {
-        // Content hasn't changed — skip re-render (P1)
+      } else if (
+        characterId === lastCharacterId &&
+        creatorNotes === lastCreatorNotes &&
+        charName === lastCharName &&
+        isMainIframeAlive()
+      ) {
+        // Content and mounted iframe are still intact — skip re-render
         return;
       } else {
+        lastCharacterId = characterId;
         lastCreatorNotes = creatorNotes;
         lastCharName = charName;
         const doc = renderContent(creatorNotes, charName);
-        
-        if (!mainIframe || mainIframe.parentElement !== iframeContainer) {
-          iframeContainer.innerHTML = "";
-          mainIframe = document.createElement("iframe");
-          mainIframe.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
-          mainIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
-          mainIframe.addEventListener("load", () => {
-            if (mainIframe) {
-              applyZoomToIframe(mainIframe, getZoom());
-              applyOpacityToIframe(mainIframe, getOpacity());
-            }
-          });
-          iframeContainer.appendChild(mainIframe);
-        }
-        mainIframe.srcdoc = doc;
+
+        iframeContainer.replaceChildren();
+        mainIframe = document.createElement("iframe");
+        mainIframe.setAttribute("sandbox", "allow-same-origin allow-popups");
+        mainIframe.style.cssText = "width:100%;height:100%;border:none;background:transparent;display:block;";
+        const createdIframe = mainIframe;
+        mainIframeLoading = root.isConnected;
+        createdIframe.addEventListener("load", () => {
+          if (mainIframe === createdIframe) {
+            mainIframeLoading = false;
+            applyZoomToIframe(createdIframe, getZoom());
+            applyOpacityToIframe(createdIframe, getOpacity());
+          }
+        });
+        createdIframe.srcdoc = doc;
+        iframeContainer.appendChild(createdIframe);
 
         currentDocHtml = doc;
         updateWidgetContent(doc);
       }
     } catch (err) {
+      if (seq !== loadSeq) return;
       showError(`Failed to read Creator Notes: ${err}`);
     }
   }
@@ -181,9 +276,80 @@ export function setup(ctx: SpindleFrontendContext) {
   // ── Event subscriptions & State Loading ──────────────────────────────────────
   loadCreatorNotes();
 
-  const unsubActivate      = tab.onActivate(() => loadCreatorNotes());
-  const unsubChatSwitched  = ctx.events.on("CHAT_SWITCHED",   () => loadCreatorNotes());
-  const unsubCharEdited    = ctx.events.on("CHARACTER_EDITED", () => loadCreatorNotes());
+  let rafActivateId: number | null = null;
+  const unsubActivate = tab.onActivate(() => {
+    loadCreatorNotes();
+    // TabPanelContent attaches tab.root in a React useEffect after setDrawerTab.
+    // Re-check on the next animation frame once root is connected to the DOM.
+    if (rafActivateId !== null) cancelAnimationFrame(rafActivateId);
+    rafActivateId = requestAnimationFrame(() => {
+      rafActivateId = null;
+      loadCreatorNotes();
+    });
+  });
+
+  // Detect when tab.root is mounted/re-mounted into the drawer DOM
+  let wasRootVisible = false;
+  const rootResizeObserver = typeof ResizeObserver !== "undefined"
+    ? new ResizeObserver((entries) => {
+        const entry = entries[0];
+        const isVisible = Boolean(
+          root.isConnected &&
+          entry &&
+          entry.contentRect.width > 0 &&
+          entry.contentRect.height > 0
+        );
+        if (!isVisible) {
+          mainIframeLoading = false;
+        } else if (!wasRootVisible) {
+          loadCreatorNotes();
+        }
+        wasRootVisible = isVisible;
+      })
+    : null;
+  rootResizeObserver?.observe(root);
+  const unsubChatSwitched  = ctx.events.on("CHAT_SWITCHED",    () => loadCreatorNotes());
+  const unsubChatChanged   = ctx.events.on("CHAT_CHANGED",     () => loadCreatorNotes());
+  const unsubCharEdited    = ctx.events.on("CHARACTER_EDITED", () => {
+    lastCharacterId = null;
+    loadCreatorNotes();
+  });
+
+  let unsubCharEditorState: (() => void) | null = null;
+  try {
+    if (charEditorApi && typeof charEditorApi.onChange === "function") {
+      unsubCharEditorState = charEditorApi.onChange(() => loadCreatorNotes());
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  // Subscribe to Lumiverse's frontend store selector `chat.active` so we are
+  // notified when ChatView finishes loading `chat.character_id` after `CHAT_SWITCHED`.
+  let unsubActiveChatState: (() => void) | null = null;
+  let activeChatPollTimer: ReturnType<typeof setInterval> | null = null;
+  const stateApi = (ctx as SpindleFrontendContext & {
+    state?: { subscribe?: (id: string, cb: (val: unknown) => void) => () => void };
+  }).state;
+  try {
+    if (stateApi && typeof stateApi.subscribe === "function") {
+      unsubActiveChatState = stateApi.subscribe("chat.active", () => loadCreatorNotes());
+    }
+  } catch (_) {
+    // Fallback to lightweight polling if host does not support `chat.active` selector
+  }
+  if (!unsubActiveChatState) {
+    let prevChatId: string | null = resolveActiveCharacterId().chatId;
+    let prevCharId: string | null = resolveActiveCharacterId().characterId;
+    activeChatPollTimer = setInterval(() => {
+      const cur = resolveActiveCharacterId();
+      if (cur.chatId !== prevChatId || cur.characterId !== prevCharId) {
+        prevChatId = cur.chatId;
+        prevCharId = cur.characterId;
+        loadCreatorNotes();
+      }
+    }, 250);
+  }
 
   // Listen for backend state responses
   const unsubMsg = ctx.onBackendMessage((payload: any) => {
@@ -197,13 +363,28 @@ export function setup(ctx: SpindleFrontendContext) {
 
   // ── Cleanup ──────────────────────────────────────────────────────────────────
   return () => {
+    clearPendingCharRetry();
+    if (rafActivateId !== null) {
+      cancelAnimationFrame(rafActivateId);
+      rafActivateId = null;
+    }
+    if (activeChatPollTimer !== null) {
+      clearInterval(activeChatPollTimer);
+      activeChatPollTimer = null;
+    }
+    try { rootResizeObserver?.disconnect(); } catch (_) {}
+    try { unsubCharEditorState?.(); } catch (_) {}
+    try { unsubActiveChatState?.(); } catch (_) {}
     try { unsubActivate();     } catch (_) {}
     try { unsubChatSwitched(); } catch (_) {}
+    try { unsubChatChanged();  } catch (_) {}
     try { unsubCharEdited();   } catch (_) {}
     try { unsubMsg();          } catch (_) {}
     try { tab.destroy();       } catch (_) {}
     try { removeStyle();       } catch (_) {}
     try { closeWidget(popOutBtn); } catch (_) {}
+    unregisterOnZoomChanged(onMainZoomChanged);
+    unregisterOnOpacityChanged(onMainOpacityChanged);
     document.removeEventListener("mousedown", onOutsideClick);
     if (settingsMenuEl) {
       if (typeof (settingsMenuEl as any)._cleanup === "function") {

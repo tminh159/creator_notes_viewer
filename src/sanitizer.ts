@@ -4,7 +4,7 @@
 const ALLOWED_TAGS = new Set([
   "a", "abbr", "address", "article", "aside", "audio",
   "b", "bdi", "bdo", "blockquote", "br",
-  "caption", "cite", "code", "col", "colgroup",
+  "caption", "center", "cite", "code", "col", "colgroup",
   "data", "datalist", "dd", "del", "details", "dfn", "div", "dl", "dt",
   "em",
   "fieldset", "figcaption", "figure", "footer",
@@ -28,7 +28,7 @@ const ALLOWED_TAGS = new Set([
 
 const BLOCKED_TAGS = new Set([
   "script", "svg", "math", "noscript", "iframe", "embed", "object",
-  "applet", "base", "template", "meta",
+  "applet", "base", "template", "meta", "title",
   // "link" is handled specially below — only allow rel=stylesheet with safe href
 ]);
 
@@ -41,7 +41,7 @@ const ALLOWED_ATTRS = new Set([
   "start", "reversed", "cite", "datetime", "wrap",
   "open", "max", "min", "low", "high", "optimum",
   "controls", "loop", "muted", "preload",
-  "poster", "playsinline",
+  "poster", "playsinline", "referrerpolicy", "align",
   // data-* handled separately in walkAndFilter — allow all data-* through
 ]);
 
@@ -135,8 +135,7 @@ const NAMED_ENTITIES: Record<string, string> = {
 };
 
 export function sanitize(raw: string): string {
-  const decoded = decodeEntities(raw);
-  const stripped = stripDangerousConstructs(decoded);
+  const stripped = stripDangerousConstructs(raw);
   const doc = parseHTML(stripped);
   walkAndFilter(doc, ALLOWED_TAGS, BLOCKED_TAGS, ALLOWED_ATTRS, URL_ATTRS, SAFE_PROTOCOLS);
   return serialize(doc);
@@ -144,15 +143,15 @@ export function sanitize(raw: string): string {
 
 function decodeEntities(html: string): string {
   let result = html;
-  result = result.replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) => {
+  result = result.replace(/&#x([0-9A-Fa-f]+);?/g, (_, hex) => {
     const cp = parseInt(hex, 16);
-    return cp > 0 ? String.fromCodePoint(cp) : `\uFFFD`;
+    return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : `\uFFFD`;
   });
-  result = result.replace(/&#(\d+);/g, (_, dec) => {
+  result = result.replace(/&#(\d+);?/g, (_, dec) => {
     const cp = parseInt(dec, 10);
-    return cp > 0 ? String.fromCodePoint(cp) : `\uFFFD`;
+    return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : `\uFFFD`;
   });
-  result = result.replace(/&([A-Za-z]+);/g, (full, name) => {
+  result = result.replace(/&([A-Za-z0-9]+);/g, (full, name) => {
     return NAMED_ENTITIES[name] ?? full;
   });
   return result;
@@ -160,6 +159,10 @@ function decodeEntities(html: string): string {
 
 function stripDangerousConstructs(html: string): string {
   let out = html;
+  out = out.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  out = out.replace(/<!DOCTYPE[^>]*>/gi, "");
+  out = out.replace(/<\?[\s\S]*?\?>/g, "");
+  out = out.replace(/<title\b[\s\S]*?<\/title\s*>/gi, "");
   out = out.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
   out = out.replace(/<script[^>]*>/gi, "");
   out = out.replace(/<svg[\s\S]*?<\/svg\s*>/gi, "");
@@ -205,6 +208,19 @@ function parseHTML(html: string): SimpleNode {
       while (i > 0 && stack[i].tag !== tagLower) i--;
       if (i > 0) stack.length = i;
     } else {
+      // Auto-close implicit <li ...> or <p ...> when a sibling opens
+      if (tagLower === "li") {
+        for (let i = stack.length - 1; i > 0; i--) {
+          if (stack[i].tag === "ul" || stack[i].tag === "ol") break;
+          if (stack[i].tag === "li") {
+            stack.length = i;
+            break;
+          }
+        }
+      } else if (tagLower === "p" && stack[stack.length - 1].tag === "p") {
+        stack.pop();
+      }
+
       const el: SimpleNode = {
         type: "element",
         tag: tagLower,
@@ -216,14 +232,22 @@ function parseHTML(html: string): SimpleNode {
       if (!selfClose && !VOID_TAGS.has(tagLower) && !RAW_TEXT_ELEMENTS.has(tagLower)) {
         stack.push(el);
       } else if (RAW_TEXT_ELEMENTS.has(tagLower)) {
-        const closingTag = `</${tagLower}>`;
-        const rawEnd = html.indexOf(closingTag, m.index + m[0].length);
-        if (rawEnd !== -1) {
-          const innerContent = html.slice(m.index + m[0].length, rawEnd);
+        const afterOpenIdx = m.index + m[0].length;
+        const closeRe = new RegExp(`<\\/\\s*${tagLower}\\s*>`, "i");
+        const closeMatch = closeRe.exec(html.slice(afterOpenIdx));
+        if (closeMatch) {
+          const rawEnd = afterOpenIdx + closeMatch.index;
+          const innerContent = html.slice(afterOpenIdx, rawEnd);
           el.children = [{ type: "text", content: innerContent }];
-          tagRe.lastIndex = rawEnd + closingTag.length;
+          tagRe.lastIndex = rawEnd + closeMatch[0].length;
           last = tagRe.lastIndex;
           continue;
+        } else {
+          const innerContent = html.slice(afterOpenIdx);
+          el.children = [{ type: "text", content: innerContent }];
+          tagRe.lastIndex = html.length;
+          last = html.length;
+          break;
         }
       }
     }
@@ -256,7 +280,8 @@ function parseAttrs(raw: string): Record<string, string> {
     const rawKey = m[1];
     const key = rawKey.toLowerCase();
     if (key.startsWith("on")) continue;
-    attrs[rawKey] = m[2] ?? m[3] ?? m[4] ?? "";
+    const rawVal = m[2] ?? m[3] ?? m[4] ?? "";
+    attrs[rawKey] = decodeEntities(rawVal);
   }
   return attrs;
 }
@@ -272,23 +297,31 @@ function walkAndFilter(
   if (node.type !== "element" && node.type !== "root") return;
   if (!node.children) return;
 
-  node.children = node.children.filter((child) => {
+  node.children = node.children.flatMap((child) => {
     if (child.type === "text") {
       if (node.type === "element" && node.tag === "style") {
         child.content = sanitizeCSS(child.content ?? "");
       }
-      return true;
+      return [child];
     }
-    if (child.type !== "element") return false;
-    if (!child.tag || blockedTags.has(child.tag)) return false;
+    if (child.type !== "element") return [];
+    if (!child.tag || blockedTags.has(child.tag)) return [];
     // Allow <link rel="stylesheet" href="https://..."> for external fonts/CSS
     if (child.tag === "link") {
       const rel = (child.attrs?.rel ?? "").toLowerCase().trim();
-      const href = child.attrs?.href ?? "";
-      if (rel === "stylesheet" && isSafeURL(href, safeProtocols)) return true;
-      return false; // block all other <link> variants
+      const href = resolveRelativeUrl(child.attrs?.href ?? "");
+      if (rel === "stylesheet" && isSafeURL(href, new Set(["http:", "https:"]))) {
+        child.attrs = { rel: "stylesheet", href };
+        child.children = [];
+        return [child];
+      }
+      return []; // block all other <link> variants
     }
-    if (!allowedTags.has(child.tag)) return false;
+    // Unwrap unknown non-blocked tags (e.g. <Space>) so valid child nodes inside/after them are preserved
+    if (!allowedTags.has(child.tag)) {
+      walkAndFilter(child, allowedTags, blockedTags, allowedAttrs, urlAttrs, safeProtocols);
+      return child.children ?? [];
+    }
 
     const filteredAttrs: Record<string, string> = {};
     if (child.attrs) {
@@ -305,22 +338,72 @@ function walkAndFilter(
           filteredAttrs[kLower] = sanitizeCSS(v);
           continue;
         }
-        if (urlAttrs.has(kLower) && !isSafeURL(v, safeProtocols)) continue;
+        if (urlAttrs.has(kLower)) {
+          const resolvedUrl = resolveRelativeUrl(v);
+          if (!isSafeURL(resolvedUrl, safeProtocols)) continue;
+          filteredAttrs[kLower] = resolvedUrl;
+          continue;
+        }
         filteredAttrs[kLower] = v;
       }
     }
+
+    if (child.tag === "a") {
+      const href = (filteredAttrs["href"] ?? "").trim();
+      if (href.startsWith("#")) {
+        delete filteredAttrs["target"];
+        delete filteredAttrs["rel"];
+      } else if (href) {
+        filteredAttrs["target"] = "_blank";
+        filteredAttrs["rel"] = "noopener noreferrer";
+      }
+    } else if (child.tag === "img" || child.tag === "video" || child.tag === "audio") {
+      filteredAttrs["referrerpolicy"] = "no-referrer";
+    }
+
     child.attrs = filteredAttrs;
 
     walkAndFilter(child, allowedTags, blockedTags, allowedAttrs, urlAttrs, safeProtocols);
-    return true;
+    return [child];
   });
 }
 
+function getHostOrigin(): string {
+  try {
+    if (typeof window !== "undefined" && window.location?.origin && /^https?:\/\//i.test(window.location.origin)) {
+      return window.location.origin.replace(/\/+$/, "");
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+function resolveRelativeUrl(url: string): string {
+  const trimmed = url.trim();
+  if (/^\/(?!\/)/.test(trimmed)) {
+    const origin = getHostOrigin();
+    if (origin) return `${origin}${trimmed}`;
+  }
+  return trimmed;
+}
+
 function sanitizeCSS(css: string): string {
-  let out = css;
-  // Only block @import NOT followed by url() — allow @import url('https://...') for Google Fonts etc.
-  // This matches CharacterLibrary's /@import\s+(?!url\s*\()/gi rule.
-  out = out.replace(/@import\s+(?!url\s*\()/gi, "/* removed */ ");
+  // Strip CSS comments and decode CSS hex escapes so obfuscated constructs cannot bypass regexes
+  let out = css.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, "");
+  out = out.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_, hex) => {
+    const cp = parseInt(hex, 16);
+    return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : "";
+  });
+
+  // Resolve root-relative url(/...) against host origin so local assets work inside about:srcdoc
+  const origin = getHostOrigin();
+  if (origin) {
+    out = out.replace(/url\(\s*(["']?)(\/(?!\/)[^)"'\s]+)\1\s*\)/gi, `url($1${origin}$2$1)`);
+  }
+
+  // Only allow @import url("https://...") or @import url('http://...')
+  out = out.replace(/@import\s+(?!url\s*\(\s*["']?https?:\/\/)/gi, "/* removed */ ");
   out = out.replace(/expression\s*\(/gi, "/* removed */(");
   out = out.replace(/behavior\s*:/gi, "/* removed */:");
   out = out.replace(/-moz-binding\s*:/gi, "/* removed */:");
@@ -329,6 +412,8 @@ function sanitizeCSS(css: string): string {
   out = out.replace(/url\s*\(\s*(["']?)\s*javascript\s*:/gi, "url($1/* removed */:");
   out = out.replace(/url\s*\(\s*(["']?)\s*vbscript\s*:/gi, "url($1/* removed */:");
   out = out.replace(/url\s*\(\s*(["']?)\s*data\s*:\s*(?!image\/)/gi, "url($1/* removed */:");
+  // Prevent breaking out of <style> tag
+  out = out.replace(/<\/\s*style/gi, "/* removed */");
   // Neutralize text-align:justify — cards designed for wide viewports use justify, but in
   // our narrow panel the browser creates extreme word-spacing to fill short lines.
   // Replace with left (= start) alignment for readable rendering at any panel width.
@@ -337,20 +422,27 @@ function sanitizeCSS(css: string): string {
 }
 
 function isSafeURL(url: string, safeProtocols: Set<string>): boolean {
-  const trimmed = url.trim().toLowerCase();
-  if (trimmed.startsWith("#") || trimmed.startsWith("data:image/")) return true;
+  const decoded = decodeEntities(url).replace(/[\u0000-\u0020]+/g, "");
+  const lower = decoded.toLowerCase();
+  if (lower.startsWith("#") || lower.startsWith("data:image/")) return true;
+  if (/^\/(?!\/)/.test(decoded)) return safeProtocols.has("http:") || safeProtocols.has("https:");
+  if (decoded.startsWith("//")) return false;
   try {
-    const parsed = new URL(url, "https://placeholder");
+    const parsed = new URL(decoded);
     return safeProtocols.has(parsed.protocol);
   } catch {
     return false;
   }
 }
 
-function serialize(node: SimpleNode): string {
-  if (node.type === "text") return node.content ?? "";
+function serialize(node: SimpleNode, inRawText = false): string {
+  if (node.type === "text") {
+    const content = node.content ?? "";
+    if (inRawText) return content;
+    return content.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
   if (node.type === "root" || !node.tag) {
-    return (node.children ?? []).map(serialize).join("");
+    return (node.children ?? []).map(c => serialize(c, false)).join("");
   }
 
   const attrs = Object.entries(node.attrs ?? {})
@@ -359,7 +451,8 @@ function serialize(node: SimpleNode): string {
 
   if (VOID_TAGS.has(node.tag)) return `<${node.tag}${attrs}>`;
 
-  const children = (node.children ?? []).map(serialize).join("");
+  const isRaw = RAW_TEXT_ELEMENTS.has(node.tag);
+  const children = (node.children ?? []).map(c => serialize(c, isRaw)).join("");
   return `<${node.tag}${attrs}>${children}</${node.tag}>`;
 }
 

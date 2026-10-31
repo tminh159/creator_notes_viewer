@@ -1,6 +1,6 @@
 {
   "identifier": "creator_notes_viewer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "Creator Notes Viewer",
   "author": "Developer",
   "description": "Renders Creator's Notes HTML/CSS as a rich live preview in a drawer tab.",
